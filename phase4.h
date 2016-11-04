@@ -5,6 +5,8 @@
 #ifndef _PHASE4_H
 #define _PHASE4_H
 
+#include <phase2.h>
+
 /*
  * Maximum line length
  */
@@ -18,9 +20,16 @@
 #define NOT_USED    0
 #define IN_USE      1
 
+/* disks */
+#define DISK0       0
+#define DISK1       1
+
 /* typedef */
 typedef struct proc proc;
 typedef struct proc *procPtr;
+typedef struct diskRequest diskRequest;
+typedef struct diskRequest *diskRequestPtr;
+
 
 /* structures */
 struct proc {
@@ -32,19 +41,41 @@ struct proc {
     int status;
 };
 
+struct diskRequest {
+    int             type;
+    void            *buffer;
+    int             track;
+    int             startSector;
+    int             numSectors;
+    diskRequestPtr  next;
+    int             result;
+    int             mailbox;
+};
+
+
 /* helper function */
-extern procPtr addToList(procPtr head, procPtr toAdd, int listType);
-extern procPtr removeFromList(procPtr head, procPtr toRemove, int listType);
+extern  void addToSleepingQueue(procPtr toAdd);
+extern  procPtr removeFromSleepingQueue();
+extern  int verifyDiskParameters(void *dbuff, int unit, int first);
+extern  void addToDiskQueue(int unit, diskRequestPtr request);
+extern  diskRequestPtr removeFromDiskQueue(int unit);
+extern  void fillDeviceRequest(USLOSS_DeviceRequest *request, int opr, void *reg1, void *reg2);
+extern  void getAmountOfTracks();
+extern  int checkTrack(int *currentTrack, int track, int diskNumber);
+extern  int runDiskRequest(int diskNumber, int operation, void *reg1, void *reg2);
+extern  void checkDeviceStatus(int status, char *name);
+extern  int runRequest(int typeDevice, int deviceNum, int operation, void *reg1, void *reg2);
+
 
 /* Function prototypes for this phase */
 extern  void sleep(systemArgs *args);
 extern  int  sleepReal(int seconds);
 
 extern  void diskRead(systemArgs *args);
-extern  int  diskReadReal(void *dbuff, int unit, int track, int first, int sectors,int *status);
+extern  int  diskReadReal(void *dbuff, int unit, int track, int first, int sectors);
 
 extern  void diskWrite(systemArgs *args);
-extern  int  diskWriteReal(void *dbuff, int unit, int track, int first, int sectors,int *status);
+extern  int  diskWriteReal(void *dbuff, int unit, int track, int first, int sectors);
 
 extern  void diskSize(systemArgs *args);
 extern  int  diskSizeReal(int unit, int *sector, int *track, int *disk);
