@@ -10,12 +10,15 @@
 #include <stdlib.h> /* needed for atoi() */
 #include <stdio.h>
     
+/* process table for sleeping */
 proc processTable[MAXPROC];
 procPtr sleepingHead;
 
-// /* queues for disk requests */
+/* queues for disk requests */
 diskRequestPtr disks[2];
 int diskMailboxes[2];
+int diskCurrentTrack[2];
+int diskQueMutex;
 
 /* array of disk requests */
 diskRequest diskRequests[MAXPROC];
@@ -84,8 +87,9 @@ void start3(void)
      */
 
 
-    diskMailboxes[0] = MboxCreate(0, 0);
-    diskMailboxes[1] = MboxCreate(0, 0);
+    diskMailboxes[0] = MboxCreate(MAXPROC, 0);
+    diskMailboxes[1] = MboxCreate(MAXPROC, 0);
+    diskQueMutex = MboxCreate(1, 0);
 
     for (i = 0; i < USLOSS_DISK_UNITS; i++) {
         sprintf(name, "Disk driver %d", i);
@@ -157,11 +161,8 @@ static int ClockDriver(char *arg)
 
         while (sleepingHead != NULL && sleepingHead->timeToWakeUp < currentTime) {
             toWakeUp = removeFromSleepingQueue();
-            if (toWakeUp != NULL) {
-                toWakeUp->status = NOT_USED;
-                MboxCondSend(toWakeUp->mailbox, NULL, 0);
-            }
-
+            toWakeUp->status = NOT_USED;
+            MboxSend(toWakeUp->mailbox, NULL, 0);
         }
     }
 }
@@ -211,68 +212,55 @@ int sleepReal(int seconds)
 static int DiskDriver(char *arg)
 {
     int currentTrack, requestType, currentSector;
-    int numSectors, track, unit, status;
+    int numSectors, unit, status;
     void *buffStart;
     diskRequestPtr request;
 
     USLOSS_PsrSet(USLOSS_PsrGet() | USLOSS_PSR_CURRENT_INT);
 
     unit = atoi((char *)arg);
-    track = 0;
-    currentTrack = 1;
-
-    /* set current track number to 0 to start off with */
-    status = checkTrack(&currentTrack, track, unit);
-    checkDeviceStatus(status, "DiskDriver(): setting track to 0");
+    currentTrack = -1;
 
     /* while loop to fill disk driver requests */
-    while (1) {
+    while (!isZapped()) {
         MboxReceive(diskMailboxes[unit], NULL, 0);
         request = removeFromDiskQueue(unit);
 
-        /* if we have nothing to do we return */
-        if (isZapped()) {
-            // loop through all of the requests and 
-            // zap them and unblock them
-            return 0;
+        /* if we have nothing to do we go back to loop conditional */
+        if (request == NULL) {
+            continue;
         }
 
         /* initialize information taken from the current disk request */
-        track = request->track;
+        diskCurrentTrack[unit] = request->track;
         currentSector = request->startSector;
         numSectors = request->numSectors;
         requestType = request->type;
 
-        printf("\ntrack: %d\n", track);
-        printf("currentSector: %d\n", currentSector);
-        printf("numSectors: %d\n", numSectors);
-        printf("requestType: %d\n\n", requestType);
 
-        /* loop through the number of sectors we need to read */
+        /* loop through the number of sectors we need to read/write */
         for (int i = 0; i < numSectors; i++) {
             
             /* Check if we need to continue on to the next track */
             if (currentSector > 15) {
-                track++;
+                diskCurrentTrack[unit]++;
                 currentSector = 0;
             }
 
             /* Check if we are in the correct track. If error occurs break */
-            USLOSS_Console("before track check\n");
-            status = checkTrack(&currentTrack, track, unit);
-            if (status == USLOSS_DEV_ERROR) {
+            status = checkTrack(&currentTrack, diskCurrentTrack[unit], unit);
+            if (status != USLOSS_DEV_READY) {
+                USLOSS_Console("DiskDriver(): error occured checking track. status %d\n", status);
                 break;
             }
-            USLOSS_Console("after track check\n");
 
             /* offset the buffer to the correct position */
             buffStart = (char *)request->buffer + (512 * i);
 
             /* send disk request */
-            USLOSS_Console("before write\n\n");
             status = runDiskRequest(unit, requestType, currentSector, buffStart);
-            USLOSS_Console("after write\n\n");
-            if (status == USLOSS_DEV_ERROR) {
+            if (status != USLOSS_DEV_READY) {
+                USLOSS_Console("DiskDriver(): error occured running request. status %d\n", status);
                 break;
             }
 
@@ -314,13 +302,14 @@ void diskRead(systemArgs *args)
 
 int diskReadReal(void *dbuff, int unit, int track, int first, int sectors)
 {
-    if (verifyDiskParameters(dbuff, unit, first)) {
+    if (verifyDiskParameters(dbuff, unit, first, track)) {
         return -1;
     }
 
     int procIndex =  getpid() % MAXPROC;
 
     diskRequestPtr request = &diskRequests[procIndex];
+
     request->type = USLOSS_DISK_READ;
     request->buffer = dbuff;
     request->track = track;
@@ -343,7 +332,6 @@ void diskWrite(systemArgs *args)
 {
     void *buf;
     int unit, track, first, sectors;
-
     buf = args->arg1;
     sectors = args->arg2;
     track = args->arg3;
@@ -360,13 +348,12 @@ void diskWrite(systemArgs *args)
 
     args->arg1 = result;
     args->arg4 = 0;
-      
 }
 
 
 int diskWriteReal(void *dbuff, int unit, int track, int first, int sectors)
 {
-    if (verifyDiskParameters(dbuff, unit, first)) {
+    if (verifyDiskParameters(dbuff, unit, first, track)) {
         return -1;
     }
 
@@ -393,7 +380,7 @@ int diskWriteReal(void *dbuff, int unit, int track, int first, int sectors)
 
 }
 
-int verifyDiskParameters(void *dbuff, int unit, int first)
+int verifyDiskParameters(void *dbuff, int unit, int first, int track)
 {
     if (unit != 0 && unit != 1) {
         return 1;
@@ -404,6 +391,10 @@ int verifyDiskParameters(void *dbuff, int unit, int first)
     }
 
     if (dbuff == NULL) {
+        return 1;
+    }
+
+    if (track < 0 || track > (unit ? disk1Tracks : disk0Tracks)) {
         return 1;
     }
 
@@ -484,8 +475,14 @@ void addToSleepingQueue(procPtr toAdd)
     
     procPtr temp = sleepingHead;
 
+    if (temp->timeToWakeUp > toAdd->timeToWakeUp) {
+        toAdd->next = temp;
+        sleepingHead = toAdd;
+        return;
+    }
+
     while (temp->next != NULL && temp->next->timeToWakeUp < toAdd->timeToWakeUp ) {
-        temp = temp-> next;
+        temp = temp->next;
     }
 
     toAdd->next = temp->next;
@@ -516,21 +513,37 @@ procPtr removeFromSleepingQueue()
 
 void addToDiskQueue(int unit, diskRequestPtr request)
 {
-    diskRequestPtr walk = disks[unit];
+    /* send to mailbox for mutex */
+    MboxSend(diskQueMutex, NULL, 0);
+
+    int currentTrack, requestTrack;
+    diskRequestPtr walk;
+
+    walk = disks[unit];
+    currentTrack = diskCurrentTrack[unit];
+    requestTrack = request->track;
     request->next = NULL;
 
-    if (walk == NULL) {
+    if (walk == NULL ||
+            (requestTrack >= currentTrack &&
+            (requestTrack < walk->track || walk->track < currentTrack))) {
+        request->next = disks[unit];
         disks[unit] = request;
+        MboxReceive(diskQueMutex, NULL, 0);
         return;
     }
 
     while (walk->next != NULL &&
-           !(walk->track < request->track && walk->next->track > request->track)) {
+            !(walk->track < requestTrack && walk->next->track > requestTrack) &&
+            !(walk->track > walk->next->track && requestTrack < walk->next->track)) {
         walk = walk->next;
     }
 
     request->next = walk->next;
     walk->next = request;
+    
+    /* unblock any process that is blocked on a send */
+    MboxReceive(diskQueMutex, NULL, 0);
 }
 
 
@@ -567,8 +580,6 @@ void getAmountOfTracks()
     /* send disk request for amount of tracks for disk1 */
     status = runDiskRequest(DISK1, USLOSS_DISK_TRACKS, &disk1Tracks, NULL);
     checkDeviceStatus(status, "getAmountOfTracks(): disk1 ");
-
-    USLOSS_Console("one: %d\ntwo: %d\n\n", disk0Tracks, disk1Tracks);
 }
 
 
@@ -581,7 +592,6 @@ int checkTrack(int *currentTrack, int track, int diskNumber)
     /* check if we are in the correct track */
     if (*currentTrack != track) {
         /* move arm to correct track */
-        USLOSS_Console("\ncheckTrack()\ncurrentTrack: %d\ntrack: %d\n", *currentTrack, track);
         status = runDiskRequest(diskNumber, USLOSS_DISK_SEEK, track, 0);
 
         /* set the current track to the new position */
@@ -617,20 +627,10 @@ int runRequest(int typeDevice, int deviceNum, int operation, void *reg1, void *r
 
     fillDeviceRequest(&deviceRequest, operation, reg1, reg2);
     status = USLOSS_DeviceOutput(typeDevice, deviceNum, &deviceRequest);
-    USLOSS_Console("\nrunRequest()\ntype: %d\ndevicenum: %d\n", typeDevice, deviceNum + 1);
-    USLOSS_Console("operation: %d\nreg1: %d\nreg2: %p\n", deviceRequest.opr, deviceRequest.reg1, deviceRequest.reg2);
-    USLOSS_Console("status: %d\n\n", status);
-    waitDevice(typeDevice, deviceNum + 1, &status);
-    USLOSS_Console("After wait\n\n");
+    waitDevice(typeDevice, deviceNum, &status);
 
     return status;
 }
-
-
-
-
-
-
 
 
 

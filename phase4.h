@@ -56,7 +56,7 @@ struct diskRequest {
 /* helper function */
 extern  void addToSleepingQueue(procPtr toAdd);
 extern  procPtr removeFromSleepingQueue();
-extern  int verifyDiskParameters(void *dbuff, int unit, int first);
+extern  int verifyDiskParameters(void *dbuff, int unit, int first, int track);
 extern  void addToDiskQueue(int unit, diskRequestPtr request);
 extern  diskRequestPtr removeFromDiskQueue(int unit);
 extern  void fillDeviceRequest(USLOSS_DeviceRequest *request, int opr, void *reg1, void *reg2);
@@ -65,7 +65,7 @@ extern  int checkTrack(int *currentTrack, int track, int diskNumber);
 extern  int runDiskRequest(int diskNumber, int operation, void *reg1, void *reg2);
 extern  void checkDeviceStatus(int status, char *name);
 extern  int runRequest(int typeDevice, int deviceNum, int operation, void *reg1, void *reg2);
-
+extern  void printqueSize(int unit);
 
 /* Function prototypes for this phase */
 extern  void sleep(systemArgs *args);

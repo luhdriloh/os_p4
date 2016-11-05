@@ -52,6 +52,7 @@ int DiskRead(void *dbuff, int unit, int track, int first, int sectors, int *stat
         return -1;   
     }
 
+    *status = sysArg.arg1;
     return 0;
 }
 
@@ -74,6 +75,7 @@ int DiskWrite(void *dbuff, int unit, int track, int first, int sectors, int *sta
         return -1;   
     }
 
+    *status = sysArg.arg1;
     return 0;
 }
 
