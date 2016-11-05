@@ -59,7 +59,7 @@ int DiskRead(void *dbuff, int unit, int track, int first, int sectors, int *stat
 int DiskWrite(void *dbuff, int unit, int track, int first, int sectors, int *status)
 {
     systemArgs sysArg;
-    
+
     CHECKMODE;
     sysArg.number = SYS_DISKWRITE;
     sysArg.arg1 = dbuff;
@@ -127,9 +127,6 @@ int TermWrite(char *buff, int bsize, int unit_id, int *nwrite)
 
     *nwrite = sysArg.arg2;
     return sysArg.arg4;
-
-
-
 }
 
 

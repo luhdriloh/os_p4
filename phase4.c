@@ -90,7 +90,7 @@ void start3(void)
     for (i = 0; i < USLOSS_DISK_UNITS; i++) {
         sprintf(name, "Disk driver %d", i);
         sprintf(buf, "%d", i);
-        pid = fork1(name, DiskDriver, buf, USLOSS_MIN_STACK, 2);
+        pid = fork1(name, DiskDriver, buf, USLOSS_MIN_STACK * 2, 2);
 
         if (pid < 0) {
             USLOSS_Console("start3(): Can't create disk driver %d\n", i);
@@ -231,7 +231,9 @@ static int DiskDriver(char *arg)
         request = removeFromDiskQueue(unit);
 
         /* if we have nothing to do we return */
-        if (request == NULL) {
+        if (isZapped()) {
+            // loop through all of the requests and 
+            // zap them and unblock them
             return 0;
         }
 
@@ -241,6 +243,10 @@ static int DiskDriver(char *arg)
         numSectors = request->numSectors;
         requestType = request->type;
 
+        printf("\ntrack: %d\n", track);
+        printf("currentSector: %d\n", currentSector);
+        printf("numSectors: %d\n", numSectors);
+        printf("requestType: %d\n\n", requestType);
 
         /* loop through the number of sectors we need to read */
         for (int i = 0; i < numSectors; i++) {
@@ -252,16 +258,20 @@ static int DiskDriver(char *arg)
             }
 
             /* Check if we are in the correct track. If error occurs break */
+            USLOSS_Console("before track check\n");
             status = checkTrack(&currentTrack, track, unit);
             if (status == USLOSS_DEV_ERROR) {
                 break;
             }
+            USLOSS_Console("after track check\n");
 
             /* offset the buffer to the correct position */
             buffStart = (char *)request->buffer + (512 * i);
 
             /* send disk request */
+            USLOSS_Console("before write\n\n");
             status = runDiskRequest(unit, requestType, currentSector, buffStart);
+            USLOSS_Console("after write\n\n");
             if (status == USLOSS_DEV_ERROR) {
                 break;
             }
@@ -286,7 +296,7 @@ void diskRead(systemArgs *args)
     buf = args->arg1;
     unit = args->arg5;
     track = args->arg3;
-    first = args->arg5;
+    first = args->arg4;
     sectors = args->arg2;
 
     int result = diskReadReal(buf, unit, track, first, sectors);
@@ -335,10 +345,10 @@ void diskWrite(systemArgs *args)
     int unit, track, first, sectors;
 
     buf = args->arg1;
-    unit = args->arg5;
-    track = args->arg3;
-    first = args->arg5;
     sectors = args->arg2;
+    track = args->arg3;
+    first = args->arg4;
+    unit = args->arg5;
 
     int result = diskWriteReal(buf, unit, track, first, sectors);
 
@@ -364,20 +374,21 @@ int diskWriteReal(void *dbuff, int unit, int track, int first, int sectors)
 
     /* create and fill our request struct */
     diskRequestPtr request = &diskRequests[procIndex];
-
-    request->type = USLOSS_DISK_READ;
+    request->type = USLOSS_DISK_WRITE;
     request->buffer = dbuff;
     request->track = track;
     request->startSector = first;
     request->numSectors = sectors;
 
+    /* put the request on the appropriate queue */
     addToDiskQueue(unit, request);
 
     // wake up disk driver 
     MboxSend(diskMailboxes[unit], NULL, 0);
 
-    // block process
+    // block current process
     MboxReceive(request->mailbox, NULL, 0);
+
     return request->result;
 
 }
@@ -406,6 +417,9 @@ void diskSize(systemArgs *args)
 
     unit = args->arg1;
     args->arg4 = diskSizeReal(unit, &sector, &track, &disk);
+    args->arg1 = sector;
+    args->arg2 = track;
+    args->arg3 = disk;
 }
 
 
@@ -507,6 +521,7 @@ void addToDiskQueue(int unit, diskRequestPtr request)
 
     if (walk == NULL) {
         disks[unit] = request;
+        return;
     }
 
     while (walk->next != NULL &&
@@ -552,6 +567,8 @@ void getAmountOfTracks()
     /* send disk request for amount of tracks for disk1 */
     status = runDiskRequest(DISK1, USLOSS_DISK_TRACKS, &disk1Tracks, NULL);
     checkDeviceStatus(status, "getAmountOfTracks(): disk1 ");
+
+    USLOSS_Console("one: %d\ntwo: %d\n\n", disk0Tracks, disk1Tracks);
 }
 
 
@@ -564,7 +581,8 @@ int checkTrack(int *currentTrack, int track, int diskNumber)
     /* check if we are in the correct track */
     if (*currentTrack != track) {
         /* move arm to correct track */
-        status = runDiskRequest(diskNumber, USLOSS_DISK_SEEK, track, NULL);
+        USLOSS_Console("\ncheckTrack()\ncurrentTrack: %d\ntrack: %d\n", *currentTrack, track);
+        status = runDiskRequest(diskNumber, USLOSS_DISK_SEEK, track, 0);
 
         /* set the current track to the new position */
         if (status == USLOSS_DEV_READY) {
@@ -584,7 +602,7 @@ int runDiskRequest(int diskNumber, int operation, void *reg1, void *reg2)
 
 void checkDeviceStatus(int status, char *name)
 {
-    if (status) {
+    if (status != USLOSS_DEV_READY) {
         USLOSS_Console("status: %d\n", status);
         USLOSS_Console("%s: error in finding size of disk. Halting...", name);
         USLOSS_Halt(1);
@@ -597,10 +615,13 @@ int runRequest(int typeDevice, int deviceNum, int operation, void *reg1, void *r
     int status;
     USLOSS_DeviceRequest deviceRequest;
 
-    /* send disk request for amount of tracks for disk0 */
     fillDeviceRequest(&deviceRequest, operation, reg1, reg2);
     status = USLOSS_DeviceOutput(typeDevice, deviceNum, &deviceRequest);
+    USLOSS_Console("\nrunRequest()\ntype: %d\ndevicenum: %d\n", typeDevice, deviceNum + 1);
+    USLOSS_Console("operation: %d\nreg1: %d\nreg2: %p\n", deviceRequest.opr, deviceRequest.reg1, deviceRequest.reg2);
+    USLOSS_Console("status: %d\n\n", status);
     waitDevice(typeDevice, deviceNum + 1, &status);
+    USLOSS_Console("After wait\n\n");
 
     return status;
 }
