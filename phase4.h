@@ -24,12 +24,16 @@
 #define DISK0       0
 #define DISK1       1
 
+/* terminal */
+#define LINE_BUFFER_SIZE 10
+
 /* typedef */
 typedef struct proc proc;
 typedef struct proc *procPtr;
 typedef struct diskRequest diskRequest;
 typedef struct diskRequest *diskRequestPtr;
-
+typedef struct termRequest termRequest;
+typedef struct termRequest *termRequestPtr;
 
 /* structures */
 struct proc {
@@ -52,6 +56,14 @@ struct diskRequest {
     int             mailbox;
 };
 
+struct termRequest {
+    int             type;
+    void            *buffer;
+    termRequestPtr  next;
+    int             result;
+    int             mailbox;
+};
+
 
 /* helper function */
 extern  void addToSleepingQueue(procPtr toAdd);
@@ -65,7 +77,10 @@ extern  int checkTrack(int *currentTrack, int track, int diskNumber);
 extern  int runDiskRequest(int diskNumber, int operation, void *reg1, void *reg2);
 extern  void checkDeviceStatus(int status, char *name);
 extern  int runRequest(int typeDevice, int deviceNum, int operation, void *reg1, void *reg2);
-extern  void printqueSize(int unit);
+extern  void checkForkReturnValue(int pid, int unit, char *name);
+extern  void turnTerminalInterruptsOn(int unit);
+
+
 
 /* Function prototypes for this phase */
 extern  void sleep(systemArgs *args);
@@ -81,10 +96,10 @@ extern  void diskSize(systemArgs *args);
 extern  int  diskSizeReal(int unit, int *sector, int *track, int *disk);
 
 extern  void termRead(systemArgs *args);
-extern  int  termReadReal(char *buff, int bsize, int unit_id, int *nread);
+extern  int  termReadReal(char *buff, int bsize, int unit_id);
 
 extern  void termWrite(systemArgs *args);
-extern  int  termWriteReal(char *buff, int bsize, int unit_id, int *nwrite);
+extern  int  termWriteReal(char *buff, int bsize, int unit_id);
 
 extern  int  start4(char *);
 

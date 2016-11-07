@@ -9,16 +9,17 @@
 
 #include <stdlib.h> /* needed for atoi() */
 #include <stdio.h>
+#include <string.h>
     
 /* process table for sleeping */
 proc processTable[MAXPROC];
 procPtr sleepingHead;
 
-/* queues for disk requests */
-diskRequestPtr disks[2];
-int diskMailboxes[2];
-int diskCurrentTrack[2];
-int diskQueMutex;
+/* stuff for disk requests */
+diskRequestPtr disksRequestQueue[USLOSS_DISK_UNITS];
+int diskMailboxes[USLOSS_DISK_UNITS];
+int diskCurrentTrack[USLOSS_DISK_UNITS];
+int diskQueMutex[USLOSS_DISK_UNITS];
 
 /* array of disk requests */
 diskRequest diskRequests[MAXPROC];
@@ -27,27 +28,32 @@ diskRequest diskRequests[MAXPROC];
 int disk0Tracks;
 int disk1Tracks;
 
+/* stuff for terminal requests */
+int termInMailboxes[USLOSS_TERM_UNITS];
+int termLineOutMailboxes[USLOSS_TERM_UNITS];
+
 static int ClockDriver(char *);
 static int DiskDriver(char *);
-
+static int TerminalDriver(char *);
+static int TermReader(char *);
+static int TermWriter(char *);
 
 void start3(void)
 {
     char	name[128];
     char    buf[MAXLINE];
-    int		i;
     int		clockPID;
-    int		disk0PID;
-    int     disk1PID;
+    int		diskPID[USLOSS_DISK_UNITS];
+
+
+    int     termDriverPID[USLOSS_TERM_UNITS];
+    int     termReaderPID[USLOSS_TERM_UNITS];
+    // int     termWriterPID[USLOSS_TERM_UNITS];
     int     pid;
     int		status;
-    /*
-     * Check kernel mode here.
-     */
 
 
     /* initialize systemcall vector */
-    // TODO: not sure if we need nullsys
 
     systemCallVec[SYS_SLEEP] = sleep;
     systemCallVec[SYS_DISKREAD] = diskRead;
@@ -57,11 +63,10 @@ void start3(void)
     systemCallVec[SYS_TERMWRITE] = termWrite;
 
     /* set up mailboxes for each process */
-    for (int i = 0; i < MAXPROC; i++) {
-        processTable[i].mailbox = MboxCreate(0, 0);
-        diskRequests[i].mailbox = processTable[i].mailbox;
+    for (int process = 0; process < MAXPROC; process++) {
+        processTable[process].mailbox = MboxCreate(0, 0);
+        diskRequests[process].mailbox = processTable[process].mailbox;
     }
-
 
     /*
      * Create clock device driver 
@@ -69,16 +74,7 @@ void start3(void)
      * be used instead -- your choice.
      */
     clockPID = fork1("Clock driver", ClockDriver, NULL, USLOSS_MIN_STACK, 2);
-    
-    if (clockPID < 0) {
-    	USLOSS_Console("start3(): Can't create clock driver\n");
-    	USLOSS_Halt(1);
-    }
-    /*
-     * Wait for the clock driver to start. The idea is that ClockDriver
-     * will V the semaphore "semRunning" once it is running.
-     */
-
+    checkForkReturnValue(clockPID, 0, "start3(): Can't create clock driver unit ");
 
     /*
      * Create the disk device drivers here.  You may need to increase
@@ -86,35 +82,45 @@ void start3(void)
      * driver, and perhaps do something with the pid returned.
      */
 
+    for (int unit = 0; unit < USLOSS_DISK_UNITS; unit++) {
+        /* create the mailboxes associated with each disk */
+        diskMailboxes[unit] = MboxCreate(MAXPROC, 0);
+        diskQueMutex[unit] = MboxCreate(1, 0);
 
-    diskMailboxes[0] = MboxCreate(MAXPROC, 0);
-    diskMailboxes[1] = MboxCreate(MAXPROC, 0);
-    diskQueMutex = MboxCreate(1, 0);
+        sprintf(name, "Disk driver %d", unit);
+        sprintf(buf, "%d", unit);
 
-    for (i = 0; i < USLOSS_DISK_UNITS; i++) {
-        sprintf(name, "Disk driver %d", i);
-        sprintf(buf, "%d", i);
         pid = fork1(name, DiskDriver, buf, USLOSS_MIN_STACK * 2, 2);
+        checkForkReturnValue(pid, unit, "start3(): Can't create disk driver unit ");
 
-        if (pid < 0) {
-            USLOSS_Console("start3(): Can't create disk driver %d\n", i);
-            USLOSS_Halt(1);
-        }
-
-        if (i == 0) {
-            disk0PID = pid;
-        }
-        else {
-            disk1PID = pid;
-        }
-
+        /* set pid in diskPID indexed by unit number */
+        diskPID[unit] = pid;
     }
 
+    /* set the number of tracks each of our disk has for use in diskSize */
     getAmountOfTracks();
 
     /*
      * Create terminal device drivers.
      */
+
+    for (int unit = 0; unit < USLOSS_TERM_UNITS; unit++) {
+        /* create mailboxes associated with each terminal */
+        termInMailboxes[unit] = MboxCreate(0, 1);
+        termLineOutMailboxes[unit] = MboxCreate(LINE_BUFFER_SIZE, MAXLINE);
+
+        sprintf(buf, "%d", unit);
+
+        sprintf(name, "Terminal driver %d", unit);
+        pid = fork1(name, TerminalDriver, buf, USLOSS_MIN_STACK, 2);
+        checkForkReturnValue(pid, unit, "start3(): Can't create terminal driver unit ");
+        termDriverPID[unit] = pid;
+
+        sprintf(name, "Terminal reader %d", unit);
+        pid = fork1(name, TermReader, buf, USLOSS_MIN_STACK, 2);
+        checkForkReturnValue(pid, unit, "start3(): Can't create terminal driver unit ");
+        termReaderPID[unit] = pid;
+    }
 
 
     /*
@@ -126,17 +132,27 @@ void start3(void)
      */
     pid = spawnReal("start4", start4, NULL, 4 * USLOSS_MIN_STACK, 3);
     pid = waitReal(&status);
+    
+
     /*
      * Zap the device drivers
      */
 
-    zap(clockPID);  // clock driver
+    /* zap clock driver */
+    zap(clockPID);
 
     /* unblock disk drivers to zap them */
-    MboxSend(diskMailboxes[DISK0], NULL, 0);
-    MboxSend(diskMailboxes[DISK1], NULL, 0);
-    zap(disk0PID);
-    zap(disk1PID);
+    for (int unit = 0; unit < USLOSS_DISK_UNITS; unit++) {
+        MboxRelease(diskMailboxes[unit]);
+    }
+
+    /* unblock terminal drivers and zap them */
+    for (int unit = 0; unit < USLOSS_TERM_UNITS; unit++) {
+        MboxRelease(termInMailboxes[unit]);
+
+        USLOSS_DeviceOutput(USLOSS_TERM_DEV, unit, &status);
+        zap(termDriverPID[unit]);
+    }
 
     quit(0);
 }
@@ -151,7 +167,7 @@ static int ClockDriver(char *arg)
     USLOSS_PsrSet(USLOSS_PsrGet() | USLOSS_PSR_CURRENT_INT);
 
     // Infinite loop until we are zap'd
-    while(! isZapped()) {
+    while(!isZapped()) {
     	result = waitDevice(USLOSS_CLOCK_DEV, 0, &status);
     	if (result != 0) {
     	    return 0;
@@ -211,7 +227,7 @@ int sleepReal(int seconds)
 
 static int DiskDriver(char *arg)
 {
-    int currentTrack, requestType, currentSector;
+    int currentTrack, requestType, currentSector, zapped;
     int numSectors, unit, status;
     void *buffStart;
     diskRequestPtr request;
@@ -223,7 +239,11 @@ static int DiskDriver(char *arg)
 
     /* while loop to fill disk driver requests */
     while (!isZapped()) {
-        MboxReceive(diskMailboxes[unit], NULL, 0);
+        zapped = MboxReceive(diskMailboxes[unit], NULL, 0);
+        if (zapped == -3) {
+            quit(0);
+        }
+
         request = removeFromDiskQueue(unit);
 
         /* if we have nothing to do we go back to loop conditional */
@@ -408,6 +428,7 @@ void diskSize(systemArgs *args)
 
     unit = args->arg1;
     args->arg4 = diskSizeReal(unit, &sector, &track, &disk);
+
     args->arg1 = sector;
     args->arg2 = track;
     args->arg3 = disk;
@@ -416,9 +437,6 @@ void diskSize(systemArgs *args)
 
 int diskSizeReal(int unit, int *sector, int *track, int *disk)
 {
-    int tracks;
-    USLOSS_DeviceRequest deviceRequest;
-
     /* check if we have a correct unit */
     if (unit != DISK0 && unit != DISK1) {
         return -1;
@@ -431,30 +449,148 @@ int diskSizeReal(int unit, int *sector, int *track, int *disk)
     return 0;
 }
 
+static int TerminalDriver(char *arg)
+{
+    int unit = atoi((char *)arg);
+    int waitStatus, inputStatus, zapped;
+    char xmitStatus, recvStatus, character;
+
+    /* turn on interrupts for reading and writing to the terminal */
+    turnTerminalInterruptsOn(unit);
+
+    while (!isZapped()) {
+        zapped = waitDevice(USLOSS_TERM_DEV, unit, &waitStatus);
+        if (zapped == -1) {
+            return 1;
+        }
+
+        /* get the status register for the terminal */
+        USLOSS_DeviceInput(USLOSS_TERM_DEV, unit, &inputStatus);
+        xmitStatus = USLOSS_TERM_STAT_XMIT(waitStatus);
+        recvStatus = USLOSS_TERM_STAT_RECV(waitStatus);
+
+        if (xmitStatus == USLOSS_DEV_ERROR || recvStatus == USLOSS_DEV_ERROR) {
+            USLOSS_Console("TerminalDriver: waitDevice returned an error.\n");
+            USLOSS_Halt(-1);
+        }
+
+        if (recvStatus == USLOSS_DEV_BUSY) {
+            character = USLOSS_TERM_STAT_CHAR(inputStatus);
+            MboxSend(termInMailboxes[unit], &character, 1);
+        }
+
+        if (xmitStatus == USLOSS_DEV_READY) {
+
+        }
+    }
+
+    return 1;
+}
+
+
+ static int TermReader(char *arg)
+ {
+    int currentBufferIndex, numCharsRead, sendResult, unit, zapped;
+    char buffer[11][MAXLINE];
+    char character;
+
+    currentBufferIndex = numCharsRead = 0;
+    unit = atoi((char *)arg);
+
+    while (!isZapped()) {
+        
+        /* receive a character and insert it into our buffer */
+        zapped = MboxReceive(termInMailboxes[unit], &character, 1);
+        if (zapped == -3) {
+            break;
+        }
+
+        buffer[currentBufferIndex][numCharsRead++] = character;
+        
+        /* check if we have read a line of text yet */
+        if (character == '\n' || numCharsRead == MAXLINE) {            
+            sendResult = MboxCondSend(termLineOutMailboxes[unit], buffer[currentBufferIndex], numCharsRead);            
+
+            numCharsRead = 0;
+            if (sendResult == 0) {
+                currentBufferIndex++;
+            }
+        }
+    }
+
+    return 1;
+ }
+
+
+ static int TermWriter(char *arg)
+ {
+    return 1;
+ }
 
 
 void termRead(systemArgs *args)
 {
+    int bytesRead;
+    char *buffer = args->arg1;
+    int bufSize = args->arg2;
+    int unit = args->arg3;
 
+    bytesRead = termReadReal(buffer, bufSize, unit);
+
+    args->arg2 = bytesRead;
+    args->arg4 = bytesRead == -1 ? -1 : 0;
 }
 
 
-int termReadReal(char *buff, int bsize, int unit_id, int *nread)
+int termReadReal(char *buff, int bsize, int unit)
 {
+    char tempBuff[MAXLINE];
+    int bytesRead;
 
+    if (buff == NULL) {
+        return -1;
+    }
+
+    if (unit < 0 || unit >= USLOSS_TERM_UNITS) {
+        return -1;
+    }
+
+    /* receive a line of input and return the number of bytes written */
+    bytesRead = MboxReceive(termLineOutMailboxes[unit], tempBuff, MAXLINE);
+
+    if (bsize < bytesRead) {
+        bytesRead = bsize;
+    }
+
+    memcpy(buff, tempBuff, bytesRead);
+    return bytesRead;
 }
-
 
 
 void termWrite(systemArgs *args)
 {
+    int bytesWritten;
+    char *buffer = args->arg1;
+    int bufSize = args->arg2;
+    int unit = args->arg3;
+
+    int result = termWriteReal(buffer, bufSize, unit);
 
 }
 
 
-int termWriteReal(char *buff, int bsize, int unit_id, int *nwrite)
+int termWriteReal(char *buff, int bsize, int unit)
 {
 
+    if (buff == NULL) {
+        return -1;
+    }
+
+    if (unit < 0 || unit >= USLOSS_TERM_UNITS) {
+        return -1;
+    }
+
+    return 1;
 }
 
 
@@ -514,48 +650,51 @@ procPtr removeFromSleepingQueue()
 void addToDiskQueue(int unit, diskRequestPtr request)
 {
     /* send to mailbox for mutex */
-    MboxSend(diskQueMutex, NULL, 0);
+    MboxSend(diskQueMutex[unit], NULL, 0);
 
-    int currentTrack, requestTrack;
+    int requestTrack;
+    diskRequest proxy;
     diskRequestPtr walk;
 
-    walk = disks[unit];
-    currentTrack = diskCurrentTrack[unit];
     requestTrack = request->track;
     request->next = NULL;
 
-    if (walk == NULL ||
-            (requestTrack >= currentTrack &&
-            (requestTrack < walk->track || walk->track < currentTrack))) {
-        request->next = disks[unit];
-        disks[unit] = request;
-        MboxReceive(diskQueMutex, NULL, 0);
-        return;
-    }
+    /* create proxy request node for current track number */
+    proxy.track = diskCurrentTrack[unit];
+    proxy.next = disksRequestQueue[unit];
+    walk = &proxy;
 
+    /* continue until request node "fits" inside two adjacent nodes */
     while (walk->next != NULL &&
-            !(walk->track < requestTrack && walk->next->track > requestTrack) &&
-            !(walk->track > walk->next->track && requestTrack < walk->next->track)) {
+            !(walk->track < requestTrack && requestTrack < walk->next->track)) {
+
+        /* edge case where the next node is less than current node track value */
+        if ((walk->track > walk->next->track) &&
+                (requestTrack > walk->track || requestTrack < walk->next->track)) {
+            break;
+        }
+
         walk = walk->next;
     }
 
     request->next = walk->next;
     walk->next = request;
+    disksRequestQueue[unit] = proxy.next;
     
     /* unblock any process that is blocked on a send */
-    MboxReceive(diskQueMutex, NULL, 0);
+    MboxReceive(diskQueMutex[unit], NULL, 0);
 }
 
 
 diskRequestPtr removeFromDiskQueue(int unit)
 {
-    diskRequestPtr temp = disks[unit];
+    diskRequestPtr temp = disksRequestQueue[unit];
 
     if (temp == NULL) {
         return NULL;
     }
 
-    disks[unit] = temp->next;
+    disksRequestQueue[unit] = temp->next;
     return temp;
 }
 
@@ -633,8 +772,22 @@ int runRequest(int typeDevice, int deviceNum, int operation, void *reg1, void *r
 }
 
 
+void checkForkReturnValue(int pid, int unit, char *name)
+{
+    if (pid < 0) {
+        USLOSS_Console("%s %d\n", name, unit);
+        USLOSS_Halt(1);
+    }
+}
 
 
+void turnTerminalInterruptsOn(int unit)
+{
+    int termInterruptsOn;
+
+    termInterruptsOn = USLOSS_TERM_CTRL_XMIT_INT(USLOSS_TERM_CTRL_RECV_INT(0));
+    USLOSS_DeviceOutput(USLOSS_TERM_DEV, unit, &termInterruptsOn);
+}
 
 
 
