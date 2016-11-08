@@ -57,11 +57,11 @@ struct diskRequest {
 };
 
 struct termRequest {
-    int             type;
     void            *buffer;
+    int             size;
     termRequestPtr  next;
-    int             result;
     int             mailbox;
+    int             bytesWritten;
 };
 
 
@@ -78,7 +78,11 @@ extern  int runDiskRequest(int diskNumber, int operation, void *reg1, void *reg2
 extern  void checkDeviceStatus(int status, char *name);
 extern  int runRequest(int typeDevice, int deviceNum, int operation, void *reg1, void *reg2);
 extern  void checkForkReturnValue(int pid, int unit, char *name);
-extern  void turnTerminalInterruptsOn(int unit);
+extern  int  turnTerminalReadInterruptsOn(int unit);
+extern  int  turnTerminalWriteandReadInterruptsOn(int unit);
+extern  void addToTerminalWriteQueue(int unit, termRequestPtr newRequest);
+extern  termRequestPtr removeFromTerminalWriteQueue(int unit);
+extern  int runTerminalRequest(int unit, char charToWrite);
 
 
 
