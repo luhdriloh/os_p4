@@ -7,16 +7,10 @@
 
 #include <phase2.h>
 
-/*
- * Maximum line length
- */
-
+/* Maximum line length*/
 #define MAXLINE         80
 
-/* type of list definitions */
-#define SLEEP_LIST  1
-
-/* status definitions */
+/* status definitions for sleep list*/
 #define NOT_USED    0
 #define IN_USE      1
 
@@ -24,10 +18,14 @@
 #define DISK0       0
 #define DISK1       1
 
-/* terminal */
+/* Mailbox Status */
+#define MAILBOX_RELEASED -3
+#define ZAPPED           -1
+
+/* Terminal */
 #define LINE_BUFFER_SIZE 10
 
-/* typedef */
+/* Typedefs */
 typedef struct proc proc;
 typedef struct proc *procPtr;
 typedef struct diskRequest diskRequest;
@@ -35,7 +33,7 @@ typedef struct diskRequest *diskRequestPtr;
 typedef struct termRequest termRequest;
 typedef struct termRequest *termRequestPtr;
 
-/* structures */
+/* Structures */
 struct proc {
     int pid;
     int timeToWakeUp;
@@ -65,28 +63,36 @@ struct termRequest {
 };
 
 
-/* helper function */
-extern  void addToSleepingQueue(procPtr toAdd);
+/* Clock Driver Functions */
+extern  void    addToSleepingQueue(procPtr toAdd);
 extern  procPtr removeFromSleepingQueue();
-extern  int verifyDiskParameters(void *dbuff, int unit, int first, int track);
-extern  void addToDiskQueue(int unit, diskRequestPtr request);
-extern  diskRequestPtr removeFromDiskQueue(int unit);
-extern  void fillDeviceRequest(USLOSS_DeviceRequest *request, int opr, void *reg1, void *reg2);
+
+
+/* Disk Driver Functions */
 extern  void getAmountOfTracks();
-extern  int checkTrack(int *currentTrack, int track, int diskNumber);
-extern  int runDiskRequest(int diskNumber, int operation, void *reg1, void *reg2);
-extern  void checkDeviceStatus(int status, char *name);
-extern  int runRequest(int typeDevice, int deviceNum, int operation, void *reg1, void *reg2);
-extern  void checkForkReturnValue(int pid, int unit, char *name);
-extern  int  turnTerminalReadInterruptsOn(int unit);
-extern  int  turnTerminalWriteandReadInterruptsOn(int unit);
-extern  void addToTerminalWriteQueue(int unit, termRequestPtr newRequest);
-extern  termRequestPtr removeFromTerminalWriteQueue(int unit);
-extern  int runTerminalRequest(int unit, char charToWrite);
+extern  int  checkTrack(int *, int, int);
+extern  int  runDiskRequest(int, int, void *, void *);
+extern  int  verifyDiskParameters(void *, int, int, int);
+extern  void addToDiskQueue(int, diskRequestPtr);
+extern  diskRequestPtr removeFromDiskQueue(int unit);
 
 
+/* Terminal Driver Functions */
+extern  void addToTerminalWriteQueue(int, termRequestPtr);
+extern  termRequestPtr removeFromTerminalWriteQueue(int);
+extern  int runTerminalRequest(int, char);
+extern  int  turnTerminalReadInterruptsOn(int);
+extern  int  turnTerminalWriteandReadInterruptsOn();
 
-/* Function prototypes for this phase */
+
+/* Helper Function */
+extern  void fillDeviceRequest(USLOSS_DeviceRequest *, int, void *, void *);
+extern  void checkDeviceStatus(int , char *);
+extern  int  runRequest(int, int, int, void *, void *);
+extern  void checkForkReturnValue(int, int, char *);
+
+
+/* User Function */
 extern  void sleep(systemArgs *args);
 extern  int  sleepReal(int seconds);
 

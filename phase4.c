@@ -11,17 +11,17 @@
 #include <stdio.h>
 #include <string.h>
     
-/* process table for sleeping */
+/* sleeping que */
 proc processTable[MAXPROC];
 procPtr sleepingHead;
 
-/* stuff for disk requests */
+/* Disk request queues and mailboxes */
 diskRequestPtr disksRequestQueue[USLOSS_DISK_UNITS];
 int diskMailboxes[USLOSS_DISK_UNITS];
 int diskCurrentTrack[USLOSS_DISK_UNITS];
 int diskQueMutex[USLOSS_DISK_UNITS];
 
-/* array of disk requests */
+/* Array of disk requests */
 diskRequest diskRequests[MAXPROC];
 
 /* number of tracks in a disk */
@@ -36,7 +36,7 @@ int termLineOutMailboxes[USLOSS_TERM_UNITS];
 termRequest termWriteRequestsTable[MAXPROC];
 termRequestPtr termWriteRequests[USLOSS_TERM_UNITS];
 int terminalRequestQueMutex[USLOSS_TERM_UNITS];
-int terminalWriteMailbox[USLOSS_TERM_UNITS];
+int termWriterMailbox[USLOSS_TERM_UNITS];
 int terminalWriteCharMailbox[USLOSS_TERM_UNITS];
 
 static int ClockDriver(char *);
@@ -105,20 +105,20 @@ void start3(void)
         diskPID[unit] = pid;
     }
 
-    /* set the number of tracks each of our disk has for use in diskSize */
+    /* 
+     * set the number of tracks each of our disk has for use in diskSize
+     */
     getAmountOfTracks();
 
-    /*
-     * Create terminal device drivers.
-     */
-
+    
+    /* Create terminal device drivers */
     for (int unit = 0; unit < USLOSS_TERM_UNITS; unit++) {
         /* create mailboxes associated with each terminal */
         termInMailboxes[unit] = MboxCreate(0, 1);
         termLineOutMailboxes[unit] = MboxCreate(LINE_BUFFER_SIZE, MAXLINE);
         terminalWriteCharMailbox[unit] = MboxCreate(0, 1);
         terminalRequestQueMutex[unit] = MboxCreate(1, 0);
-        terminalWriteMailbox[unit] = MboxCreate(MAXPROC, 0);
+        termWriterMailbox[unit] = MboxCreate(MAXPROC, 0);
 
         sprintf(buf, "%d", unit);
 
@@ -137,13 +137,7 @@ void start3(void)
     }
 
 
-    /*
-     * Create first user-level process and wait for it to finish.
-     * These are lower-case because they are not system calls;
-     * system calls cannot be invoked from kernel mode.
-     * I'm assuming kernel-mode versions of the system calls
-     * with lower-case first letters.
-     */
+    /* Spawn user level process */
     pid = spawnReal("start4", start4, NULL, 4 * USLOSS_MIN_STACK, 3);
     pid = waitReal(&status);
     
@@ -159,14 +153,15 @@ void start3(void)
     /* unblock terminal drivers and zap them */
     for (int unit = 0; unit < USLOSS_TERM_UNITS; unit++) {
         MboxRelease(termInMailboxes[unit]);
-        MboxRelease(terminalWriteMailbox[unit]);
+        MboxRelease(termWriterMailbox[unit]);
 
-        USLOSS_DeviceOutput(USLOSS_TERM_DEV, unit, &status);
+        turnTerminalWriteandReadInterruptsOn(unit);
         zap(termDriverPID[unit]);
     }
 
     quit(0);
 }
+
 
 static int ClockDriver(char *arg)
 {
@@ -195,6 +190,14 @@ static int ClockDriver(char *arg)
 }
 
 
+/* ------------------------------------------------------------------------
+   Name - sleep
+   Purpose - 
+   Parameters -
+   Returns - n/a
+   Side Effects - n/a
+   ----------------------------------------------------------------------- */
+
 void sleep(systemArgs *args)
 {
     int seconds;
@@ -202,6 +205,14 @@ void sleep(systemArgs *args)
     args->arg4 = sleepReal(seconds);
 }
 
+
+/* ------------------------------------------------------------------------
+   Name - sleepReal
+   Purpose - 
+   Parameters -
+   Returns - n/a
+   Side Effects - n/a
+   ----------------------------------------------------------------------- */
 
 int sleepReal(int seconds)
 {
@@ -212,7 +223,6 @@ int sleepReal(int seconds)
     int pid, sleepProcTableIndex, timeToWakeUp;
     procPtr sleepProc;
 
-    // TODO: create proc and put into que
     pid = getpid();
     sleepProcTableIndex = pid % MAXPROC;
     timeToWakeUp = USLOSS_Clock() + (seconds * 1000000);
@@ -222,6 +232,7 @@ int sleepReal(int seconds)
         return -1;
     }
 
+    /* Fill sleep request struct */
     sleepProc->pid = pid;
     sleepProc->timeToWakeUp = timeToWakeUp;
     sleepProc->next = NULL;
@@ -229,16 +240,24 @@ int sleepReal(int seconds)
 
     addToSleepingQueue(sleepProc);
     
-    // block process
+    /* block process */
     MboxReceive(sleepProc->mailbox, NULL, 0);
 
     return 0;
 }
 
 
+/* ------------------------------------------------------------------------
+   Name - DiskDriver
+   Purpose - 
+   Parameters -
+   Returns - n/a
+   Side Effects - n/a
+   ----------------------------------------------------------------------- */
+
 static int DiskDriver(char *arg)
 {
-    int currentTrack, requestType, currentSector, zapped;
+    int currentTrack, requestType, currentSector, mailboxStatus;
     int numSectors, unit, status;
     void *buffStart;
     diskRequestPtr request;
@@ -248,26 +267,21 @@ static int DiskDriver(char *arg)
     unit = atoi((char *)arg);
     currentTrack = -1;
 
-    /* while loop to fill disk driver requests */
+    /* Loop to fullfill disk requests */
     while (!isZapped()) {
-        zapped = MboxReceive(diskMailboxes[unit], NULL, 0);
-        if (zapped == -3) {
-            quit(0);
+        mailboxStatus = MboxReceive(diskMailboxes[unit], NULL, 0);
+        if (mailboxStatus == MAILBOX_RELEASED) {
+            return 1;
         }
 
+        /* Get next request */
         request = removeFromDiskQueue(unit);
 
-        /* if we have nothing to do we go back to loop conditional */
-        if (request == NULL) {
-            continue;
-        }
-
-        /* initialize information taken from the current disk request */
+        /* Initialize information taken from the current disk request */
         diskCurrentTrack[unit] = request->track;
         currentSector = request->startSector;
         numSectors = request->numSectors;
         requestType = request->type;
-
 
         /* loop through the number of sectors we need to read/write */
         for (int i = 0; i < numSectors; i++) {
@@ -285,10 +299,10 @@ static int DiskDriver(char *arg)
                 break;
             }
 
-            /* offset the buffer to the correct position */
+            /* Offset the buffer to the correct position */
             buffStart = (char *)request->buffer + (512 * i);
 
-            /* send disk request */
+            /* Send disk request */
             status = runDiskRequest(unit, requestType, currentSector, buffStart);
             if (status != USLOSS_DEV_READY) {
                 USLOSS_Console("DiskDriver(): error occured running request. status %d\n", status);
@@ -298,7 +312,7 @@ static int DiskDriver(char *arg)
             currentSector++;
         }
 
-        /* release the mailbox with the status returned */
+        /* Release the mailbox with the status returned */
         request->result = status;
         MboxSend(request->mailbox, NULL, 0);
     }
@@ -306,6 +320,14 @@ static int DiskDriver(char *arg)
     return 0;
 }
 
+
+/* ------------------------------------------------------------------------
+   Name - diskRead
+   Purpose - 
+   Parameters -
+   Returns - n/a
+   Side Effects - n/a
+   ----------------------------------------------------------------------- */
 
 void diskRead(systemArgs *args)
 {
@@ -330,6 +352,14 @@ void diskRead(systemArgs *args)
     args->arg4 = 0;
 }
 
+
+/* ------------------------------------------------------------------------
+   Name - diskReadReal
+   Purpose - 
+   Parameters -
+   Returns - n/a
+   Side Effects - n/a
+   ----------------------------------------------------------------------- */
 
 int diskReadReal(void *dbuff, int unit, int track, int first, int sectors)
 {
@@ -357,7 +387,13 @@ int diskReadReal(void *dbuff, int unit, int track, int first, int sectors)
     return request->result;
 }
 
-
+/* ------------------------------------------------------------------------
+   Name - diskWrite
+   Purpose - 
+   Parameters -
+   Returns - n/a
+   Side Effects - n/a
+   ----------------------------------------------------------------------- */
 
 void diskWrite(systemArgs *args)
 {
@@ -381,6 +417,13 @@ void diskWrite(systemArgs *args)
     args->arg4 = 0;
 }
 
+/* ------------------------------------------------------------------------
+   Name - diskWriteReal
+   Purpose - 
+   Parameters -
+   Returns - n/a
+   Side Effects - n/a
+   ----------------------------------------------------------------------- */
 
 int diskWriteReal(void *dbuff, int unit, int track, int first, int sectors)
 {
@@ -411,6 +454,56 @@ int diskWriteReal(void *dbuff, int unit, int track, int first, int sectors)
 
 }
 
+/* ------------------------------------------------------------------------
+   Name - diskSize
+   Purpose - 
+   Parameters -
+   Returns - n/a
+   Side Effects - n/a
+   ----------------------------------------------------------------------- */
+
+void diskSize(systemArgs *args)
+{
+    int sector, track, disk, unit;
+
+    unit = args->arg1;
+    args->arg4 = diskSizeReal(unit, &sector, &track, &disk);
+
+    args->arg1 = sector;
+    args->arg2 = track;
+    args->arg3 = disk;
+}
+
+/* ------------------------------------------------------------------------
+   Name - diskSizeReal
+   Purpose - 
+   Parameters -
+   Returns - n/a
+   Side Effects - n/a
+   ----------------------------------------------------------------------- */
+
+int diskSizeReal(int unit, int *sector, int *track, int *disk)
+{
+    /* check if we have a correct unit */
+    if (unit != DISK0 && unit != DISK1) {
+        return -1;
+    }
+   
+    *sector = USLOSS_DISK_SECTOR_SIZE;
+    *track = USLOSS_DISK_TRACK_SIZE;
+    *disk = unit ? disk1Tracks : disk0Tracks;
+
+    return 0;
+}
+
+/* ------------------------------------------------------------------------
+   Name - verifyDiskParameters
+   Purpose - 
+   Parameters -
+   Returns - n/a
+   Side Effects - n/a
+   ----------------------------------------------------------------------- */
+
 int verifyDiskParameters(void *dbuff, int unit, int first, int track)
 {
     if (unit != 0 && unit != 1) {
@@ -433,77 +526,54 @@ int verifyDiskParameters(void *dbuff, int unit, int first, int track)
 }
 
 
-void diskSize(systemArgs *args)
-{
-    int sector, track, disk, unit;
-
-    unit = args->arg1;
-    args->arg4 = diskSizeReal(unit, &sector, &track, &disk);
-
-    args->arg1 = sector;
-    args->arg2 = track;
-    args->arg3 = disk;
-}
-
-
-int diskSizeReal(int unit, int *sector, int *track, int *disk)
-{
-    /* check if we have a correct unit */
-    if (unit != DISK0 && unit != DISK1) {
-        return -1;
-    }
-   
-    *sector = USLOSS_DISK_SECTOR_SIZE;
-    *track = USLOSS_DISK_TRACK_SIZE;
-    *disk = unit ? disk1Tracks : disk0Tracks;
-
-    return 0;
-}
+/* ------------------------------------------------------------------------
+   Name - TerminalDriver
+   Purpose - 
+   Parameters -
+   Returns - n/a
+   Side Effects - n/a
+   ----------------------------------------------------------------------- */
 
 static int TerminalDriver(char *arg)
 {
     int unit = atoi((char *)arg);
-    int waitStatus, inputStatus, zapped, byteForWriting, writeMailboxStatus;
-    char xmitStatus, recvStatus, character, charToWrite;
+    int waitStatus, mailboxStatus, writeMailboxStatus;
+    char xmitStatus, recvStatus, charToRead, charToWrite;
 
-    byteForWriting = 1;
 
-    /* turn on interrupts for reading and writing to the terminal */
+    /* turn on interrupts for reading from the terminal */
     turnTerminalReadInterruptsOn(unit);
 
     while (!isZapped()) {
-        zapped = waitDevice(USLOSS_TERM_DEV, unit, &waitStatus);
-        if (zapped == -1) {
+        mailboxStatus = waitDevice(USLOSS_TERM_DEV, unit, &waitStatus);
+        if (mailboxStatus == ZAPPED) {
             return 1;
         }
 
-        /* get the status register for the terminal */
-        USLOSS_DeviceInput(USLOSS_TERM_DEV, unit, &inputStatus);
-        xmitStatus = USLOSS_TERM_STAT_XMIT(inputStatus);
+        /* Get the status for xmit and recv */
+        xmitStatus = USLOSS_TERM_STAT_XMIT(waitStatus);
         recvStatus = USLOSS_TERM_STAT_RECV(waitStatus);
-
-        if (byteForWriting) {
-            writeMailboxStatus = MboxCondReceive(terminalWriteCharMailbox[unit], &charToWrite, 1);
-
-            if (writeMailboxStatus > 0) {
-                byteForWriting = 0;
-            }
-        }
 
         if (xmitStatus == USLOSS_DEV_ERROR || recvStatus == USLOSS_DEV_ERROR) {
             USLOSS_Console("TerminalDriver: waitDevice returned an error.\n");
             USLOSS_Halt(-1);
         }
 
+        /* Receive the character that is in the register */
         if (recvStatus == USLOSS_DEV_BUSY) {
-            character = USLOSS_TERM_STAT_CHAR(inputStatus);
-            MboxSend(termInMailboxes[unit], &character, 1);
+            charToRead = USLOSS_TERM_STAT_CHAR(waitStatus);
+            MboxSend(termInMailboxes[unit], &charToRead, 1);
         }
 
-        /* if you are ready to write character and you have a character */
-        if (xmitStatus == USLOSS_DEV_READY && byteForWriting == 0) {
-            runTerminalRequest(unit, charToWrite);
-            byteForWriting = 1;
+        /* Write a character to the terminal if you are ready */
+        if (xmitStatus == USLOSS_DEV_READY) {
+            writeMailboxStatus = MboxCondReceive(terminalWriteCharMailbox[unit], &charToWrite, 1);
+
+            /*  Check that we have a character to write */
+            if (writeMailboxStatus > 0) {
+                runTerminalRequest(unit, charToWrite);  
+                turnTerminalReadInterruptsOn(unit);              
+            }
         }
     }
 
@@ -511,9 +581,17 @@ static int TerminalDriver(char *arg)
 }
 
 
+/* ------------------------------------------------------------------------
+   Name - TermReader
+   Purpose - 
+   Parameters -
+   Returns - n/a
+   Side Effects - n/a
+   ----------------------------------------------------------------------- */
+
  static int TermReader(char *arg)
  {
-    int currentBufferIndex, numCharsRead, sendResult, unit, zapped;
+    int currentBufferIndex, numCharsRead, sendResult, unit, mailboxStatus;
     char buffer[11][MAXLINE];
     char character;
 
@@ -521,16 +599,19 @@ static int TerminalDriver(char *arg)
     unit = atoi((char *)arg);
 
     while (!isZapped()) {
-        
         /* receive a character and insert it into our buffer */
-        zapped = MboxReceive(termInMailboxes[unit], &character, 1);
-        if (zapped == -3) {
+        mailboxStatus = MboxReceive(termInMailboxes[unit], &character, 1);
+        if (mailboxStatus == MAILBOX_RELEASED) {
             break;
         }
 
+        /* Insert character into line buffer */
         buffer[currentBufferIndex][numCharsRead++] = character;
         
-        /* check if we have read a line of text yet */
+        /*
+         * Check if we have read a line of input yet. If so send it to the
+         * termLineOutMailbox for termReadReal to read from.
+         */
         if (character == '\n' || numCharsRead == MAXLINE) {            
             sendResult = MboxCondSend(termLineOutMailboxes[unit], buffer[currentBufferIndex], numCharsRead);            
 
@@ -545,6 +626,14 @@ static int TerminalDriver(char *arg)
  }
 
 
+/* ------------------------------------------------------------------------
+   Name - termRead
+   Purpose - 
+   Parameters -
+   Returns - n/a
+   Side Effects - n/a
+   ----------------------------------------------------------------------- */
+
 void termRead(systemArgs *args)
 {
     int bytesRead;
@@ -558,6 +647,14 @@ void termRead(systemArgs *args)
     args->arg4 = bytesRead == -1 ? -1 : 0;
 }
 
+
+/* ------------------------------------------------------------------------
+   Name - termReadReal
+   Purpose - 
+   Parameters -
+   Returns - n/a
+   Side Effects - n/a
+   ----------------------------------------------------------------------- */
 
 int termReadReal(char *buff, int bsize, int unit)
 {
@@ -575,6 +672,7 @@ int termReadReal(char *buff, int bsize, int unit)
     /* receive a line of input and return the number of bytes written */
     bytesRead = MboxReceive(termLineOutMailboxes[unit], tempBuff, MAXLINE);
 
+    /* Find the appropriate amount of characters to write to buffer */
     if (bsize < bytesRead) {
         bytesRead = bsize;
     }
@@ -584,9 +682,17 @@ int termReadReal(char *buff, int bsize, int unit)
 }
 
 
+/* ------------------------------------------------------------------------
+   Name - TermWriter
+   Purpose - 
+   Parameters -
+   Returns - n/a
+   Side Effects - n/a
+   ----------------------------------------------------------------------- */
+
 static int TermWriter(char *arg)
 {
-    int unit, zapped, buffSize;
+    int unit, mailboxStatus, buffSize, bytesWritten;
     char *buff, newline;
     termRequestPtr newRequest;
 
@@ -594,29 +700,29 @@ static int TermWriter(char *arg)
     newline = '\n';
 
     while (!isZapped()) {
-        zapped = MboxReceive(terminalWriteMailbox[unit], NULL, 0);
-        newRequest = removeFromTerminalWriteQueue(unit);
-        if (zapped == -3) {
+        mailboxStatus = MboxReceive(termWriterMailbox[unit], NULL, 0);
+        if (mailboxStatus == MAILBOX_RELEASED) {
             return 1;
         }
 
-        int bytesWritten = 0;
+        /* Receive next request from queue */
+        newRequest = removeFromTerminalWriteQueue(unit);
         buff = newRequest->buffer;
         buffSize = newRequest->size;
 
-        for (int index = 0; index < buffSize; index++, bytesWritten++) {
+        for (bytesWritten = 0; bytesWritten < buffSize; bytesWritten++) {
             /* send char over to terminal driver */
             turnTerminalWriteandReadInterruptsOn(unit);
-            MboxSend(terminalWriteCharMailbox[unit], (buff + index), 1);
-            turnTerminalReadInterruptsOn(unit);
+            MboxSend(terminalWriteCharMailbox[unit], (buff + bytesWritten), 1);
         }
 
         if (buffSize < MAXLINE - 1 && buff[buffSize-1] != '\n') {
+            turnTerminalWriteandReadInterruptsOn(unit);
             MboxSend(terminalWriteCharMailbox[unit], &newline, 1);
             bytesWritten++;
         }
 
-        /* turn off terminal xmit interrupts */
+        /* unblock the process that asked for a write */
         newRequest->bytesWritten = bytesWritten;
         MboxSend(newRequest->mailbox, NULL, 0);
     }
@@ -624,6 +730,14 @@ static int TermWriter(char *arg)
     return 1;
 }
 
+
+/* ------------------------------------------------------------------------
+   Name - termWrite
+   Purpose - 
+   Parameters -
+   Returns - n/a
+   Side Effects - n/a
+   ----------------------------------------------------------------------- */
 
 void termWrite(systemArgs *args)
 {
@@ -639,12 +753,21 @@ void termWrite(systemArgs *args)
 }
 
 
+/* ------------------------------------------------------------------------
+   Name - termWriteReal
+   Purpose - 
+   Parameters -
+   Returns - n/a
+   Side Effects - n/a
+   ----------------------------------------------------------------------- */
+
 int termWriteReal(char *buff, int bsize, int unit)
 {
 
     int processIndex;
     termRequestPtr newRequest;
 
+    /* Error checking */
     if (buff == NULL) {
         return -1;
     }
@@ -660,7 +783,7 @@ int termWriteReal(char *buff, int bsize, int unit)
 
     /* add request to the write que and wake up terminal reader */
     addToTerminalWriteQueue(unit, newRequest);
-    MboxSend(terminalWriteMailbox[unit], NULL, 0);
+    MboxSend(termWriterMailbox[unit], NULL, 0);
 
     /* put process to sleep */
     MboxReceive(newRequest->mailbox, NULL, 0);
@@ -670,7 +793,7 @@ int termWriteReal(char *buff, int bsize, int unit)
 
 
 /* ------------------------------------------------------------------------
-   Name - addToList
+   Name - addToSleepingQueue
    Purpose - 
    Parameters -
    Returns - n/a
@@ -701,9 +824,8 @@ void addToSleepingQueue(procPtr toAdd)
 }
 
 
-
 /* ------------------------------------------------------------------------
-   Name - removeFromList
+   Name - removeFromSleepingQueue
    Purpose - 
    Parameters -
    Returns - n/a
@@ -721,6 +843,14 @@ procPtr removeFromSleepingQueue()
     return toRemove;   
 }
 
+
+/* ------------------------------------------------------------------------
+   Name - addToDiskQueue
+   Purpose - 
+   Parameters -
+   Returns - n/a
+   Side Effects - n/a
+   ----------------------------------------------------------------------- */
 
 void addToDiskQueue(int unit, diskRequestPtr request)
 {
@@ -761,6 +891,14 @@ void addToDiskQueue(int unit, diskRequestPtr request)
 }
 
 
+/* ------------------------------------------------------------------------
+   Name - removeFromDiskQueue
+   Purpose - 
+   Parameters -
+   Returns - n/a
+   Side Effects - n/a
+   ----------------------------------------------------------------------- */
+
 diskRequestPtr removeFromDiskQueue(int unit)
 {
     diskRequestPtr temp = disksRequestQueue[unit];
@@ -773,6 +911,14 @@ diskRequestPtr removeFromDiskQueue(int unit)
     return temp;
 }
 
+
+/* ------------------------------------------------------------------------
+   Name - addToTerminalWriteQueue
+   Purpose - 
+   Parameters -
+   Returns - n/a
+   Side Effects - n/a
+   ----------------------------------------------------------------------- */
 
 void addToTerminalWriteQueue(int unit, termRequestPtr newRequest)
 {
@@ -796,6 +942,14 @@ void addToTerminalWriteQueue(int unit, termRequestPtr newRequest)
 }
 
 
+/* ------------------------------------------------------------------------
+   Name - removeFromTerminalWriteQueue
+   Purpose - 
+   Parameters -
+   Returns - n/a
+   Side Effects - n/a
+   ----------------------------------------------------------------------- */
+
 termRequestPtr removeFromTerminalWriteQueue(int unit)
 {
     termRequestPtr temp = termWriteRequests[unit];
@@ -809,6 +963,14 @@ termRequestPtr removeFromTerminalWriteQueue(int unit)
 }
 
 
+/* ------------------------------------------------------------------------
+   Name - fillDeviceRequest
+   Purpose - 
+   Parameters -
+   Returns - n/a
+   Side Effects - n/a
+   ----------------------------------------------------------------------- */
+
 void fillDeviceRequest(USLOSS_DeviceRequest *request, int opr, void *reg1, void *reg2)
 {
     request->opr = opr;
@@ -816,6 +978,14 @@ void fillDeviceRequest(USLOSS_DeviceRequest *request, int opr, void *reg1, void 
     request->reg2 = reg2;
 }
 
+
+/* ------------------------------------------------------------------------
+   Name - getAmountOfTracks
+   Purpose - 
+   Parameters -
+   Returns - n/a
+   Side Effects - n/a
+   ----------------------------------------------------------------------- */
 
 void getAmountOfTracks()
 {
@@ -831,6 +1001,14 @@ void getAmountOfTracks()
     checkDeviceStatus(status, "getAmountOfTracks(): disk1 ");
 }
 
+
+/* ------------------------------------------------------------------------
+   Name - checkTrack
+   Purpose - 
+   Parameters -
+   Returns - n/a
+   Side Effects - n/a
+   ----------------------------------------------------------------------- */
 
 int checkTrack(int *currentTrack, int track, int diskNumber)
 {
@@ -853,11 +1031,27 @@ int checkTrack(int *currentTrack, int track, int diskNumber)
 }
 
 
+/* ------------------------------------------------------------------------
+   Name - runDiskRequest
+   Purpose - 
+   Parameters -
+   Returns - n/a
+   Side Effects - n/a
+   ----------------------------------------------------------------------- */
+
 int runDiskRequest(int diskNumber, int operation, void *reg1, void *reg2)
 {
     return runRequest(USLOSS_DISK_DEV, diskNumber, operation, reg1, reg2);
 }
 
+
+/* ------------------------------------------------------------------------
+   Name - runTerminalRequest
+   Purpose - 
+   Parameters -
+   Returns - n/a
+   Side Effects - n/a
+   ----------------------------------------------------------------------- */
 
 int runTerminalRequest(int unit, char charToWrite)
 {
@@ -869,6 +1063,14 @@ int runTerminalRequest(int unit, char charToWrite)
 }
 
 
+/* ------------------------------------------------------------------------
+   Name - runTerminalRequest
+   Purpose - 
+   Parameters -
+   Returns - n/a
+   Side Effects - n/a
+   ----------------------------------------------------------------------- */
+
 void checkDeviceStatus(int status, char *name)
 {
     if (status != USLOSS_DEV_READY) {
@@ -878,6 +1080,14 @@ void checkDeviceStatus(int status, char *name)
     }
 }
 
+
+/* ------------------------------------------------------------------------
+   Name - runTerminalRequest
+   Purpose - 
+   Parameters -
+   Returns - n/a
+   Side Effects - n/a
+   ----------------------------------------------------------------------- */
 
 int runRequest(int typeDevice, int deviceNum, int operation, void *reg1, void *reg2)
 {
@@ -892,6 +1102,14 @@ int runRequest(int typeDevice, int deviceNum, int operation, void *reg1, void *r
 }
 
 
+/* ------------------------------------------------------------------------
+   Name - checkForkReturnValue
+   Purpose - 
+   Parameters -
+   Returns - n/a
+   Side Effects - n/a
+   ----------------------------------------------------------------------- */
+
 void checkForkReturnValue(int pid, int unit, char *name)
 {
     if (pid < 0) {
@@ -900,6 +1118,14 @@ void checkForkReturnValue(int pid, int unit, char *name)
     }
 }
 
+
+/* ------------------------------------------------------------------------
+   Name - turnTerminalReadInterruptsOn
+   Purpose - 
+   Parameters -
+   Returns - n/a
+   Side Effects - n/a
+   ----------------------------------------------------------------------- */
 
 int turnTerminalReadInterruptsOn(int unit)
 {
@@ -912,6 +1138,14 @@ int turnTerminalReadInterruptsOn(int unit)
 }
 
 
+/* ------------------------------------------------------------------------
+   Name - turnTerminalWriteandReadInterruptsOn
+   Purpose - 
+   Parameters -
+   Returns - n/a
+   Side Effects - n/a
+   ----------------------------------------------------------------------- */
+
 int turnTerminalWriteandReadInterruptsOn(int unit)
 {
     int termInterruptsOn;
@@ -922,11 +1156,5 @@ int turnTerminalWriteandReadInterruptsOn(int unit)
 
     return termInterruptsOn;
 }
-
-
-
-
-
-
 
 
