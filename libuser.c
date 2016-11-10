@@ -20,10 +20,10 @@
     }  \
 }
 
-
 int Sleep(int seconds)
 {
     systemArgs sysArg;
+    
     CHECKMODE;
     sysArg.number = SYS_SLEEP;
     sysArg.arg1 = seconds;

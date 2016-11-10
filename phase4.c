@@ -9,9 +9,9 @@
 
 #include <stdlib.h> /* needed for atoi() */
 #include <stdio.h>
-#include <string.h>
+#include <string.h> /* needed for memcpy() */
     
-/* sleeping que */
+/* Sleeping queue */
 proc processTable[MAXPROC];
 procPtr sleepingHead;
 
@@ -50,16 +50,13 @@ void start3(void)
     char	name[128];
     char    buf[MAXLINE];
     int		clockPID;
-    int		diskPID[USLOSS_DISK_UNITS];
-
-
-    int     termDriverPID[USLOSS_TERM_UNITS];
     int     pid;
-    int		status;
+    int     status;
+    int		diskPID[USLOSS_DISK_UNITS];
+    int     termDriverPID[USLOSS_TERM_UNITS];
 
 
     /* initialize systemcall vector */
-
     systemCallVec[SYS_SLEEP] = sleep;
     systemCallVec[SYS_DISKREAD] = diskRead;
     systemCallVec[SYS_DISKWRITE] = diskWrite;
@@ -77,20 +74,17 @@ void start3(void)
     }
 
     /*
-     * Create clock device driver 
-     * I am assuming a semaphore here for coordination.  A mailbox can
-     * be used instead -- your choice.
+     * Create clock device driver
      */
     clockPID = fork1("Clock driver", ClockDriver, NULL, USLOSS_MIN_STACK, 2);
     checkForkReturnValue(clockPID, 0, "start3(): Can't create clock driver unit ");
 
-    /*
-     * Create the disk device drivers here.  You may need to increase
-     * the stack size depending on the complexity of your
-     * driver, and perhaps do something with the pid returned.
-     */
 
+    /*
+     * Create the disk device drivers
+     */
     for (int unit = 0; unit < USLOSS_DISK_UNITS; unit++) {
+        
         /* create the mailboxes associated with each disk */
         diskMailboxes[unit] = MboxCreate(MAXPROC, 0);
         diskQueMutex[unit] = MboxCreate(1, 0);
@@ -105,14 +99,12 @@ void start3(void)
         diskPID[unit] = pid;
     }
 
-    /* 
-     * set the number of tracks each of our disk has for use in diskSize
-     */
+    /* set the number of tracks each of our disk has for use in diskSize */
     getAmountOfTracks();
-
     
     /* Create terminal device drivers */
     for (int unit = 0; unit < USLOSS_TERM_UNITS; unit++) {
+        
         /* create mailboxes associated with each terminal */
         termInMailboxes[unit] = MboxCreate(0, 1);
         termLineOutMailboxes[unit] = MboxCreate(LINE_BUFFER_SIZE, MAXLINE);
@@ -122,15 +114,18 @@ void start3(void)
 
         sprintf(buf, "%d", unit);
 
+        /* Create the terminal driver process */
         sprintf(name, "Terminal driver %d", unit);
         pid = fork1(name, TerminalDriver, buf, USLOSS_MIN_STACK, 2);
         checkForkReturnValue(pid, unit, "start3(): Can't create terminal driver unit ");
         termDriverPID[unit] = pid;
 
+        /* Create the terminal reader process */
         sprintf(name, "Terminal reader %d", unit);
         pid = fork1(name, TermReader, buf, USLOSS_MIN_STACK, 2);
         checkForkReturnValue(pid, unit, "start3(): Can't create terminal reader unit ");
 
+        /* Create the terminal writer process */
         sprintf(name, "Terminal writer %d", unit);
         pid = fork1(name, TermWriter, buf, USLOSS_MIN_STACK, 2);
         checkForkReturnValue(pid, unit, "start3(): Can't create terminal writer unit ");
@@ -163,16 +158,25 @@ void start3(void)
 }
 
 
+/* ------------------------------------------------------------------------
+   Name - ClockDriver
+   Purpose - Provides the sleeping functionality for processes that ask
+                to be put to sleep. 
+   Parameters - 
+            char *arg: Holds the unit number of the clock driver
+   Returns - 
+            int      : A return status 
+   Side Effects - Will unblock processes that need to waken up
+   ----------------------------------------------------------------------- */
+
 static int ClockDriver(char *arg)
 {
     int result, status, currentTime;
     procPtr toWakeUp;
 
-    // Let the parent know we are running and enable interrupts.
-    // TODO: we need to add mailboxes for mutual exclusion
     USLOSS_PsrSet(USLOSS_PsrGet() | USLOSS_PSR_CURRENT_INT);
 
-    // Infinite loop until we are zap'd
+    /* Loop to check if it is ready to unblock any sleeping processes */
     while(!isZapped()) {
     	result = waitDevice(USLOSS_CLOCK_DEV, 0, &status);
     	if (result != 0) {
@@ -192,8 +196,10 @@ static int ClockDriver(char *arg)
 
 /* ------------------------------------------------------------------------
    Name - sleep
-   Purpose - 
+   Purpose - Parses out the systemArgs that was passed in by the user process
+                Sleep
    Parameters -
+            systemArgs *args : Holds parameters inside used for sleepReal
    Returns - n/a
    Side Effects - n/a
    ----------------------------------------------------------------------- */
@@ -208,10 +214,13 @@ void sleep(systemArgs *args)
 
 /* ------------------------------------------------------------------------
    Name - sleepReal
-   Purpose - 
-   Parameters -
-   Returns - n/a
-   Side Effects - n/a
+   Purpose - Prepares a process to be put to sleep
+   Parameters - 
+            int seconds : The number of the seconds the process is to be
+                put to sleep 
+   Returns - 
+            int : Integer indicating success 
+   Side Effects - Puts a process to sleep
    ----------------------------------------------------------------------- */
 
 int sleepReal(int seconds)
@@ -249,10 +258,13 @@ int sleepReal(int seconds)
 
 /* ------------------------------------------------------------------------
    Name - DiskDriver
-   Purpose - 
+   Purpose - Fullfill user disk requests
    Parameters -
-   Returns - n/a
-   Side Effects - n/a
+            char *arg : The unit number of the disk driver
+   Returns -
+            int       : Integer indicating success
+   Side Effects - Fullfills disk requests and also unblocks a process
+                    waiting for a result
    ----------------------------------------------------------------------- */
 
 static int DiskDriver(char *arg)
@@ -323,8 +335,10 @@ static int DiskDriver(char *arg)
 
 /* ------------------------------------------------------------------------
    Name - diskRead
-   Purpose - 
+   Purpose - Parses out the systemArgs that was passed in by the user process
+                DiskRead
    Parameters -
+            systemArgs *args : Holds parameters inside used for diskReadReal
    Returns - n/a
    Side Effects - n/a
    ----------------------------------------------------------------------- */
@@ -355,10 +369,17 @@ void diskRead(systemArgs *args)
 
 /* ------------------------------------------------------------------------
    Name - diskReadReal
-   Purpose - 
-   Parameters -
-   Returns - n/a
-   Side Effects - n/a
+   Purpose - Prepares a read request for a process
+   Parameters - 
+        void *dbuff : The buffer to put the read in information in
+        int  unit   : The disk unit to read from
+        int  track  : The track to read from
+        int  first  : First track to read from
+        int  sectors: Amount of tracks to read
+   Returns - 
+            int         : Integer indicating success 
+   Side Effects - Puts information read from disk into dbuff and puts
+                    process to sleep until read is complete
    ----------------------------------------------------------------------- */
 
 int diskReadReal(void *dbuff, int unit, int track, int first, int sectors)
@@ -387,10 +408,13 @@ int diskReadReal(void *dbuff, int unit, int track, int first, int sectors)
     return request->result;
 }
 
+
 /* ------------------------------------------------------------------------
    Name - diskWrite
-   Purpose - 
+   Purpose - Parses out the systemArgs that was passed in by the user process
+                DiskWrite
    Parameters -
+            systemArgs *args : Holds parameters inside used for diskWriteReal
    Returns - n/a
    Side Effects - n/a
    ----------------------------------------------------------------------- */
@@ -419,10 +443,17 @@ void diskWrite(systemArgs *args)
 
 /* ------------------------------------------------------------------------
    Name - diskWriteReal
-   Purpose - 
-   Parameters -
-   Returns - n/a
-   Side Effects - n/a
+   Purpose - Prepares a disk write request for a process
+   Parameters - 
+        void *dbuff : The buffer that has the data to write
+        int  unit   : The disk unit to write to
+        int  track  : The track to write to
+        int  first  : First track to write to
+        int  sectors: Amount of tracks to write
+   Returns - 
+            int         : Integer indicating success 
+   Side Effects - Puts information read from disk into dbuff and puts
+                    process to sleep until read is complete
    ----------------------------------------------------------------------- */
 
 int diskWriteReal(void *dbuff, int unit, int track, int first, int sectors)
@@ -456,8 +487,10 @@ int diskWriteReal(void *dbuff, int unit, int track, int first, int sectors)
 
 /* ------------------------------------------------------------------------
    Name - diskSize
-   Purpose - 
+   Purpose - Parses out the systemArgs that was passed in by the user process
+                DiskSize
    Parameters -
+            systemArgs *args : Holds parameters used for diskSize
    Returns - n/a
    Side Effects - n/a
    ----------------------------------------------------------------------- */
@@ -474,11 +507,17 @@ void diskSize(systemArgs *args)
     args->arg3 = disk;
 }
 
+
 /* ------------------------------------------------------------------------
    Name - diskSizeReal
-   Purpose - 
-   Parameters -
-   Returns - n/a
+   Purpose - Prepares a disk size request for a process
+   Parameters - 
+        int  unit    : The disk unit to get the size of
+        int  *track  : Pointer to put amount of secors in track
+        int  *disk   : Pointer to put amount of tracks in a disk
+        int  *sector : Pointer to put amount of btyes in a sector
+   Returns - 
+            int         : Integer indicating success 
    Side Effects - n/a
    ----------------------------------------------------------------------- */
 
@@ -498,9 +537,10 @@ int diskSizeReal(int unit, int *sector, int *track, int *disk)
 
 /* ------------------------------------------------------------------------
    Name - verifyDiskParameters
-   Purpose - 
-   Parameters -
-   Returns - n/a
+   Purpose - Verifies disk paramters
+   Parameters - Parameters are those passed to diskSize, diskRead,
+                    and diskWrite
+   Returns - An integer indicating whether you have invalid disk parameters
    Side Effects - n/a
    ----------------------------------------------------------------------- */
 
@@ -528,10 +568,13 @@ int verifyDiskParameters(void *dbuff, int unit, int first, int track)
 
 /* ------------------------------------------------------------------------
    Name - TerminalDriver
-   Purpose - 
+   Purpose - Fullfill user terminal requests
    Parameters -
-   Returns - n/a
-   Side Effects - n/a
+            char *arg : The unit number of the terminal driver
+   Returns -
+            int       : Integer indicating success
+   Side Effects - Fullfills terminal requests and unblocks processes
+                    waiting for a result
    ----------------------------------------------------------------------- */
 
 static int TerminalDriver(char *arg)
@@ -583,10 +626,13 @@ static int TerminalDriver(char *arg)
 
 /* ------------------------------------------------------------------------
    Name - TermReader
-   Purpose - 
+   Purpose - Fullfill user terminal read requests
    Parameters -
-   Returns - n/a
-   Side Effects - n/a
+            char *arg : The unit number of the terminal reader
+   Returns -
+            int       : Integer indicating success
+   Side Effects - Fullfills terminal read requests and unblocks processes
+                    waiting for a result
    ----------------------------------------------------------------------- */
 
  static int TermReader(char *arg)
@@ -628,8 +674,10 @@ static int TerminalDriver(char *arg)
 
 /* ------------------------------------------------------------------------
    Name - termRead
-   Purpose - 
+   Purpose - Parses out the systemArgs that was passed in by the user process
+                TermRead
    Parameters -
+            systemArgs *args : Holds parameters inside used for termRead
    Returns - n/a
    Side Effects - n/a
    ----------------------------------------------------------------------- */
@@ -650,9 +698,13 @@ void termRead(systemArgs *args)
 
 /* ------------------------------------------------------------------------
    Name - termReadReal
-   Purpose - 
-   Parameters -
-   Returns - n/a
+   Purpose - Prepares a terminal read request for a process
+   Parameters - 
+        char *buff   : The buffer to put in read in information into
+        int  bsize   : Size of the buffer, as to not write to much into it
+        int  unit    : The terminal unit to read from
+   Returns - 
+            int         : Integer indicating success 
    Side Effects - n/a
    ----------------------------------------------------------------------- */
 
@@ -684,10 +736,13 @@ int termReadReal(char *buff, int bsize, int unit)
 
 /* ------------------------------------------------------------------------
    Name - TermWriter
-   Purpose - 
+   Purpose - Fullfill user terminal write requests
    Parameters -
-   Returns - n/a
-   Side Effects - n/a
+            char *arg : The unit number of the terminal driver
+   Returns -
+            int       : Integer indicating success
+   Side Effects - Fullfills terminal write requests and unblocks processes
+                    waiting for a result
    ----------------------------------------------------------------------- */
 
 static int TermWriter(char *arg)
@@ -733,8 +788,10 @@ static int TermWriter(char *arg)
 
 /* ------------------------------------------------------------------------
    Name - termWrite
-   Purpose - 
+   Purpose - Parses out the systemArgs that was passed in by the user process
+                TermWrite
    Parameters -
+            systemArgs *args : Holds parameters inside used for termWrite
    Returns - n/a
    Side Effects - n/a
    ----------------------------------------------------------------------- */
@@ -755,9 +812,14 @@ void termWrite(systemArgs *args)
 
 /* ------------------------------------------------------------------------
    Name - termWriteReal
-   Purpose - 
-   Parameters -
-   Returns - n/a
+   Purpose - Prepares a terminal write request for a process
+   Parameters - 
+        char *buff   : The buffer to write from
+        int  bsize   : Size of the buffer, as to write the right amount
+                            characters to the terminal
+        int  unit    : The terminal unit to read from
+   Returns - 
+            int         : Integer indicating success 
    Side Effects - n/a
    ----------------------------------------------------------------------- */
 
@@ -794,10 +856,14 @@ int termWriteReal(char *buff, int bsize, int unit)
 
 /* ------------------------------------------------------------------------
    Name - addToSleepingQueue
-   Purpose - 
-   Parameters -
+   Purpose - Add a process to the sleeping queue
+   Parameters - 
+            procPtr toAdd: A pointer to the process to add to the queue
    Returns - n/a
-   Side Effects - n/a
+   Side Effects -
+            Adds a process to the global procPtr 'sleepingHead', which
+                holds the processes needing to sleep for a certain amount
+                of time
    ----------------------------------------------------------------------- */
 
 void addToSleepingQueue(procPtr toAdd)
@@ -826,10 +892,11 @@ void addToSleepingQueue(procPtr toAdd)
 
 /* ------------------------------------------------------------------------
    Name - removeFromSleepingQueue
-   Purpose - 
-   Parameters -
-   Returns - n/a
-   Side Effects - n/a
+   Purpose - Removes the first element from the sleeping queue
+   Parameters - n/a
+   Returns - 
+            procPtr : A pointer to the removed procPtr 
+   Side Effects - Removes a procPtr from the list 'sleepingHead'
    ----------------------------------------------------------------------- */
 
 procPtr removeFromSleepingQueue()
@@ -846,10 +913,13 @@ procPtr removeFromSleepingQueue()
 
 /* ------------------------------------------------------------------------
    Name - addToDiskQueue
-   Purpose - 
+   Purpose - Add a disk request to the appropriate disk request head
    Parameters -
+            int unit : The disk driver unit to add the request to
+            diskRequestPtr request : The actual request to add to
+                the disk request queue 'disksRequestQueue[unit]'
    Returns - n/a
-   Side Effects - n/a
+   Side Effects - A request is added the queue
    ----------------------------------------------------------------------- */
 
 void addToDiskQueue(int unit, diskRequestPtr request)
@@ -882,8 +952,11 @@ void addToDiskQueue(int unit, diskRequestPtr request)
         walk = walk->next;
     }
 
+    /* Add the new request to the queue */
     request->next = walk->next;
     walk->next = request;
+
+    /* Set the new head */
     disksRequestQueue[unit] = proxy.next;
     
     /* unblock any process that is blocked on a send */
@@ -893,10 +966,13 @@ void addToDiskQueue(int unit, diskRequestPtr request)
 
 /* ------------------------------------------------------------------------
    Name - removeFromDiskQueue
-   Purpose - 
+   Purpose - Remove the first request from the appropriate disk request
+                queue 'disksRequestQueue[unit]'
    Parameters -
-   Returns - n/a
-   Side Effects - n/a
+            int unit : The unit from which to remove a request from
+   Returns - 
+            diskRequestPtr : A pointer to the removed request
+   Side Effects - The request queue is decreased as an element is removed
    ----------------------------------------------------------------------- */
 
 diskRequestPtr removeFromDiskQueue(int unit)
@@ -914,13 +990,17 @@ diskRequestPtr removeFromDiskQueue(int unit)
 
 /* ------------------------------------------------------------------------
    Name - addToTerminalWriteQueue
-   Purpose - 
+   Purpose - Add a terminal write request to the appropriate
+                terminal write request head pointer 'termWriteRequests[unit]'
    Parameters -
+            int unit : The disk driver unit to add the request to
+            termRequestPtr request : The actual request to add to
+                the terminal write request queue 'termWriteRequests[unit]'
    Returns - n/a
-   Side Effects - n/a
+   Side Effects - A request is added to the terminalWriteRequests head
    ----------------------------------------------------------------------- */
 
-void addToTerminalWriteQueue(int unit, termRequestPtr newRequest)
+void addToTerminalWriteQueue(int unit, termRequestPtr request)
 {
     MboxSend(terminalRequestQueMutex[unit], NULL, 0);
 
@@ -934,8 +1014,8 @@ void addToTerminalWriteQueue(int unit, termRequestPtr newRequest)
         walk = walk->next;
     }
 
-    newRequest->next = NULL;
-    walk->next = newRequest;
+    request->next = NULL;
+    walk->next = request;
     termWriteRequests[unit] = temp.next;
 
     MboxReceive(terminalRequestQueMutex[unit], NULL, 0);
@@ -944,10 +1024,13 @@ void addToTerminalWriteQueue(int unit, termRequestPtr newRequest)
 
 /* ------------------------------------------------------------------------
    Name - removeFromTerminalWriteQueue
-   Purpose - 
+   Purpose - Remove the first request from the appropriate terminal write
+                request queue 'terminalWriteRequests[unit]'
    Parameters -
-   Returns - n/a
-   Side Effects - n/a
+            int unit : The unit from which to remove a request from
+   Returns - 
+            termRequestPtr : A pointer to the removed request
+   Side Effects - The request queue is decreased as an element is removed
    ----------------------------------------------------------------------- */
 
 termRequestPtr removeFromTerminalWriteQueue(int unit)
@@ -965,8 +1048,13 @@ termRequestPtr removeFromTerminalWriteQueue(int unit)
 
 /* ------------------------------------------------------------------------
    Name - fillDeviceRequest
-   Purpose - 
+   Purpose - Fill a USLOSS_DeviceRequest struct
    Parameters -
+        USLOSS_DeviceRequest *request : Pointer to request to fill in
+        int opr : Type of request
+        void *reg1 : Parameter one to put into the request
+        void *reg2 : Parameter two to put into the request
+
    Returns - n/a
    Side Effects - n/a
    ----------------------------------------------------------------------- */
@@ -981,10 +1069,11 @@ void fillDeviceRequest(USLOSS_DeviceRequest *request, int opr, void *reg1, void 
 
 /* ------------------------------------------------------------------------
    Name - getAmountOfTracks
-   Purpose - 
-   Parameters -
+   Purpose - Gets the amount of tracks in a disk for use in diskSize
+   Parameters - n/a
    Returns - n/a
-   Side Effects - n/a
+   Side Effects - Sets global variables disk0Tracks, and disk1Tracks with
+                    correct amount of tracks within each disk
    ----------------------------------------------------------------------- */
 
 void getAmountOfTracks()
@@ -1004,10 +1093,14 @@ void getAmountOfTracks()
 
 /* ------------------------------------------------------------------------
    Name - checkTrack
-   Purpose - 
+   Purpose - Changes the track that the disk is on
    Parameters -
+        int *currentTrack : The value of the current track we are on
+        int track : The value of the track that we should be on
+        int diskNumber : The unit of the disk we are looking at
    Returns - n/a
-   Side Effects - n/a
+   Side Effects - If a change in track occurs then currentTrack is changed
+                    to the new track we are on
    ----------------------------------------------------------------------- */
 
 int checkTrack(int *currentTrack, int track, int diskNumber)
@@ -1033,10 +1126,15 @@ int checkTrack(int *currentTrack, int track, int diskNumber)
 
 /* ------------------------------------------------------------------------
    Name - runDiskRequest
-   Purpose - 
+   Purpose - Run a disk request
    Parameters -
-   Returns - n/a
-   Side Effects - n/a
+        int diskNumber : The disk number to run the request on
+        int operation : The operation we want to run on the disk
+        void *reg1 : The first parameter for our USLOSS_DeviceRequest struct
+        void *reg2 : The second parameter for our USLOSS_DeviceRequest struct
+   Returns -
+        int : Integer indicating success
+   Side Effects - A disk request will have been run unless an error occurred
    ----------------------------------------------------------------------- */
 
 int runDiskRequest(int diskNumber, int operation, void *reg1, void *reg2)
@@ -1047,10 +1145,14 @@ int runDiskRequest(int diskNumber, int operation, void *reg1, void *reg2)
 
 /* ------------------------------------------------------------------------
    Name - runTerminalRequest
-   Purpose - 
+   Purpose - Runs a terminal request that writes something to the terminal
    Parameters -
-   Returns - n/a
-   Side Effects - n/a
+            int unit : The terminal unit on which to run the request
+            char charToWrite : The character to write to the terminal
+   Returns -
+            int : Integer indicating success
+   Side Effects - The specified terminal will have been operated upon
+                    unless an error is returned
    ----------------------------------------------------------------------- */
 
 int runTerminalRequest(int unit, char charToWrite)
@@ -1064,11 +1166,15 @@ int runTerminalRequest(int unit, char charToWrite)
 
 
 /* ------------------------------------------------------------------------
-   Name - runTerminalRequest
-   Purpose - 
+   Name - checkDeviceStatus
+   Purpose - Checks status of a device. Used for the initial setup of the
+                diskDrivers
    Parameters -
+            int status : The status that was returned from the device
+            char *name : The name of the function who called this
    Returns - n/a
-   Side Effects - n/a
+   Side Effects - Halts since this needs to be valid for diskSize to work
+                    correctly
    ----------------------------------------------------------------------- */
 
 void checkDeviceStatus(int status, char *name)
@@ -1082,9 +1188,14 @@ void checkDeviceStatus(int status, char *name)
 
 
 /* ------------------------------------------------------------------------
-   Name - runTerminalRequest
-   Purpose - 
+   Name - runRequest
+   Purpose - Calls USLOSS_DeviceOutput and waits for it to complete an action
    Parameters -
+            int typeDevice : The type of device to run a request on
+            int deviceNum : The unit of the device to run request on
+            int operation : The type of operation to run on the specified device
+            void *reg1 : Parameter one to put into the deviceRequest struct
+            void *reg2 : Parameter two to put into the deviceRequest struct
    Returns - n/a
    Side Effects - n/a
    ----------------------------------------------------------------------- */
@@ -1104,16 +1215,19 @@ int runRequest(int typeDevice, int deviceNum, int operation, void *reg1, void *r
 
 /* ------------------------------------------------------------------------
    Name - checkForkReturnValue
-   Purpose - 
+   Purpose - Checks that a valid pid is returned
    Parameters -
+            int pid : pid to check
+            int unit : Unit of device this was called on
+            char *name : Name of device who called this function
    Returns - n/a
-   Side Effects - n/a
+   Side Effects - Halts if error occured
    ----------------------------------------------------------------------- */
 
 void checkForkReturnValue(int pid, int unit, char *name)
 {
     if (pid < 0) {
-        USLOSS_Console("%s %d\n", name, unit);
+        USLOSS_Console("%s %d: Error occured with pid returned\n", name, unit);
         USLOSS_Halt(1);
     }
 }
@@ -1121,10 +1235,12 @@ void checkForkReturnValue(int pid, int unit, char *name)
 
 /* ------------------------------------------------------------------------
    Name - turnTerminalReadInterruptsOn
-   Purpose - 
+   Purpose - Turns on receive interrupts for the terminal
    Parameters -
-   Returns - n/a
-   Side Effects - n/a
+            int unit : Terminal unit to turn interrupts on
+   Returns -
+            int : New status register
+   Side Effects - Turn on interrupts for a specified terminal
    ----------------------------------------------------------------------- */
 
 int turnTerminalReadInterruptsOn(int unit)
@@ -1140,10 +1256,12 @@ int turnTerminalReadInterruptsOn(int unit)
 
 /* ------------------------------------------------------------------------
    Name - turnTerminalWriteandReadInterruptsOn
-   Purpose - 
+   Purpose - Turns on receive and write interrupts for the terminal
    Parameters -
-   Returns - n/a
-   Side Effects - n/a
+            int unit : Terminal unit to turn interrupts on
+   Returns -
+            int : New status register
+   Side Effects - Turn on interrupts for a specified terminal
    ----------------------------------------------------------------------- */
 
 int turnTerminalWriteandReadInterruptsOn(int unit)
